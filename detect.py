@@ -1,77 +1,56 @@
-import cv2 as cv
-import os
-from ultralytics import YOLO
-import supervision as sv
+import cv2
+import time
+import torch
+from picamera2 import Picamera2
+from datetime import datetime
 
-def predict_from_webcam(save_video=False, filename=None, cam_id=0):
-    try:
-        # Inisialisasi kamera
-        cap = cv.VideoCapture(cam_id)
-        if not cap.isOpened():
-            raise Exception("Webcam tidak bisa dibuka!")
+# Load YOLO model (ganti dengan path model YOLOv11 kamu)
+model = torch.hub.load('ultralytics/yolov8n', 'custom', path='best.pt', force_reload=True)
 
-        # Ambil ukuran dan fps dari webcam
-        w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv.CAP_PROP_FPS)) or 30  # Default ke 30 fps jika tidak tersedia
+# Set label target (misalnya 'burung', 'belalang', dll)
+TARGET_CLASSES = ['burung pipit', 'tikus', 'wereng']
 
-        # Set up annotators
-        thickness = sv.calculate_optimal_line_thickness((w, h))
-        text_scale = sv.calculate_optimal_text_scale((w, h))
-        box_annotator = sv.BoxAnnotator(thickness=thickness, color_lookup=sv.ColorLookup.TRACK)
-        label_annotator = sv.LabelAnnotator(
-            text_scale=text_scale, text_thickness=thickness,
-            text_position=sv.Position.TOP_LEFT, color_lookup=sv.ColorLookup.TRACK
-        )
+# Inisialisasi kamera
+picam2 = Picamera2()
+picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
+picam2.start()
 
-        model = YOLO("best.pt")
-        tracker = sv.ByteTrack(frame_rate=fps)
-        class_dict = model.names
+print("[INFO] Sistem Deteksi Hama Dimulai...")
 
-        if save_video and filename:
-            os.makedirs("detected_videos", exist_ok=True)
-            save_path = os.path.join("detected_videos", filename)
-            out = cv.VideoWriter(save_path, cv.VideoWriter_fourcc(*"XVID"), fps, (w, h))
-        else:
-            out = None
+try:
+    while True:
+        # Ambil frame dari Pi Camera
+        frame = picam2.capture_array()
 
-        # Proses frame-frame dari webcam
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Deteksi objek dengan YOLO
+        results = model(frame)
 
-            result = model(frame)[0]
-            detections = sv.Detections.from_ultralytics(result)
-            detections = tracker.update_with_detections(detections)
+        # Konversi hasil ke pandas dataframe
+        df = results.pandas().xyxy[0]
 
-            if detections.tracker_id is not None:
-                detections = detections[detections.confidence > 0.6]
+        # Filter deteksi hanya target yang diinginkan
+        detected = df[df['name'].isin(TARGET_CLASSES)]
 
-                labels = [
-                    f"{class_dict[cls]} {conf*100:.1f}%"
-                    for cls, conf in zip(detections.class_id, detections.confidence)
-                ]
+        # Tampilkan hasil di frame
+        for _, row in detected.iterrows():
+            x1, y1, x2, y2, conf, cls_name = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax']), row['confidence'], row['name']
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            label = f"{cls_name} {conf:.2f}"
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                box_annotator.annotate(frame, detections=detections)
-                label_annotator.annotate(frame, detections=detections, labels=labels)
+            # Log deteksi
+            print(f"[{datetime.now()}] Deteksi: {cls_name} dengan kepercayaan {conf:.2f}")
 
-            if save_video and out:
-                out.write(frame)
+            # TODO: Kirim notifikasi WhatsApp/Twilio jika perlu
 
-            cv.imshow("YOLO11 Webcam Detection", frame)
+        # Tampilkan frame (jika pakai monitor)
+        cv2.imshow("Deteksi Hama", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-            if cv.waitKey(1) & 0xFF == ord('p'):
-                break
+except KeyboardInterrupt:
+    print("\n[INFO] Dihentikan oleh pengguna.")
 
-    except Exception as e:
-        print(f"Error: {e}")
-
-    finally:
-        cap.release()
-        if save_video and out:
-            out.release()
-        cv.destroyAllWindows()
-        print("Webcam processing selesai, semua resource dilepas.")
-
-predict_from_webcam(save_video=True, filename="hasil_webcam.avi")
+finally:
+    picam2.stop()
+    cv2.destroyAllWindows()
