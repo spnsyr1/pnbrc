@@ -1,55 +1,60 @@
 import cv2
 import time
-import torch
-from picamera2 import Picamera2
+import logging
+from ultralytics import YOLO
 from datetime import datetime
+from picamera2 import Picamera2
 
-# Load YOLO model (ganti dengan path model YOLOv11 kamu)
-model = torch.hub.load('ultralytics/yolov8n', 'custom', path='best.pt', force_reload=True)
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Load YOLO model using Ultralytics API
+model = YOLO('best.pt')
 
 # Set label target (misalnya 'burung', 'belalang', dll)
 TARGET_CLASSES = ['burung pipit', 'tikus', 'wereng']
 
-# Inisialisasi kamera
+# Initialize Pi Camera
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
+picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (320, 240)}))
 picam2.start()
 
-print("[INFO] Sistem Deteksi Hama Dimulai...")
+logging.info("Sistem Deteksi Hama Dimulai...")
 
 try:
     while True:
-        # Ambil frame dari Pi Camera
+        # Capture frame from Pi Camera
         frame = picam2.capture_array()
 
-        # Deteksi objek dengan YOLO
+        # Detect objects with YOLO
         results = model(frame)
+        boxes = results[0].boxes
+        names = results[0].names
 
-        # Konversi hasil ke pandas dataframe
-        df = results.pandas().xyxy[0]
+        # Display results on frame
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            cls_name = names[cls_id]
+            conf = float(box.conf[0])
+            if cls_name in TARGET_CLASSES:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{cls_name} {conf:.2f}"
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                logging.info(f"Deteksi: {cls_name} dengan kepercayaan {conf:.2f}")
 
-        # Filter deteksi hanya target yang diinginkan
-        detected = df[df['name'].isin(TARGET_CLASSES)]
-
-        # Tampilkan hasil di frame
-        for _, row in detected.iterrows():
-            x1, y1, x2, y2, conf, cls_name = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax']), row['confidence'], row['name']
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{cls_name} {conf:.2f}"
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            # Log deteksi
-            print(f"[{datetime.now()}] Deteksi: {cls_name} dengan kepercayaan {conf:.2f}")
-
-            # TODO: Kirim notifikasi WhatsApp/Twilio jika perlu
-
-        # Tampilkan frame (jika pakai monitor)
+        # Display frame
         cv2.imshow("Deteksi Hama", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+        # Add a small delay to reduce CPU load
+        time.sleep(0.1)
+
 except KeyboardInterrupt:
-    print("\n[INFO] Dihentikan oleh pengguna.")
+    logging.info("Dihentikan oleh pengguna.")
+except Exception as e:
+    logging.error(f"An error occurred: {e}")
 
 finally:
     picam2.stop()
